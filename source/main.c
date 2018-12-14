@@ -32,7 +32,6 @@
 
 */
 
-
 #include <libavutil/imgutils.h>
 #include <libavutil/samplefmt.h>
 #include <libavutil/timestamp.h>
@@ -62,11 +61,9 @@ static int video_frame_count = 0;
 #define URL "tcp://0.0.0.0:2222"
 //#define TCP_RECV_BUFFER "500000"
 
-
-char* tmp_buf;//[1280*720*4]; // __attribute__((aligned(0x1000)));
+char *tmp_buf; //[1280*720*4]; // __attribute__((aligned(0x1000)));
 int frame_done = 1;
 static Mutex buf_mut;
-
 
 static const SocketInitConfig socketInitConf = {
     .bsdsockets_version = 1,
@@ -87,11 +84,13 @@ static const SocketInitConfig socketInitConf = {
     .dns_timeout = 0,
 };
 
+u64 old_time, new_time;
 
 static int decode_packet(int *got_frame, int cached)
 {
     int ret = 0;
     *got_frame = 0;
+
     if (pkt.stream_index == video_stream_idx)
     {
         //decode video frame
@@ -121,7 +120,12 @@ static int decode_packet(int *got_frame, int cached)
 
             if (++video_frame_count % 60 == 0)
             {
-                printf("%d\n", video_frame_count);
+
+                new_time = svcGetSystemTick();
+
+                printf("Framerate: %f\n", 60.0 / ((new_time - old_time) / 19200000.0));
+
+                old_time = new_time;
             }
 
             if (ctx_sws == NULL)
@@ -129,9 +133,8 @@ static int decode_packet(int *got_frame, int cached)
 
             //u8 *fbuf = gfxGetFramebuffer(NULL, NULL);
 
-            
             mutexLock(&buf_mut);
-            while(frame_done)
+            while (frame_done)
             {
                 mutexUnlock(&buf_mut);
                 mutexLock(&buf_mut);
@@ -272,7 +275,6 @@ int handleVid()
         goto end;
     }
 
-
     frame = av_frame_alloc();
 
     if (frame == NULL)
@@ -300,8 +302,7 @@ int handleVid()
                 break;
             pkt.data += ret;
             pkt.size -= ret;
-        } 
-        while (pkt.size > 0);
+        } while (pkt.size > 0);
         av_packet_unref(&orig_pkt);
     }
 
@@ -326,9 +327,9 @@ end:
     return ret;
 }
 
-void inputHandlerLoop(void* dummy)
+void inputHandlerLoop(void *dummy)
 {
-    while(appletMainLoop())
+    while (appletMainLoop())
     {
         handleInput();
         svcSleepThread(23333333);
@@ -337,27 +338,26 @@ void inputHandlerLoop(void* dummy)
 
 void drawSplash()
 {
-    FILE* img = fopen("romfs:/splash.rgba", "rb");
+    FILE *img = fopen("romfs:/splash.rgba", "rb");
 
     mutexLock(&buf_mut);
-    fread(tmp_buf, 1280*720*4, 1, img);
+    fread(tmp_buf, 1280 * 720 * 4, 1, img);
     frame_done = 1;
     mutexUnlock(&buf_mut);
 
     fclose(img);
 }
 
-
-void decLoop(void* dummy)
+void decLoop(void *dummy)
 {
     socketInitialize(&socketInitConf);
 
-    while(appletMainLoop()) {
+    while (appletMainLoop())
+    {
         drawSplash();
         handleVid();
     }
 }
-
 
 int main(int argc, char **argv)
 {
@@ -365,9 +365,9 @@ int main(int argc, char **argv)
     svcSetThreadPriority(mainThreadHandle, 0x3b);
     // Makes the main-thread preemptive
 
-    tmp_buf = memalign(0x1000, 1280*720*4);
-    memset(tmp_buf, 0xFF, 1280*720*4);
-    //pcvInitialize();
+    tmp_buf = memalign(0x1000, 1280 * 720 * 4);
+    memset(tmp_buf, 0xFF, 1280 * 720 * 4);
+    pcvInitialize();
     //pcvSetClockRate(PcvModule_Cpu, 1785000000);
     socketInitialize(&socketInitConf);
     romfsInit();
@@ -391,8 +391,6 @@ int main(int argc, char **argv)
     rgbframe->format = AV_PIX_FMT_RGBA;
     av_image_alloc(rgbframe->data, rgbframe->linesize, rgbframe->width, rgbframe->height, rgbframe->format, 32);
 
-
-
     static Thread inputHandlerThread;
     threadCreate(&inputHandlerThread, inputHandlerLoop, NULL, 0x100000, 0x2b, 1);
     threadStart(&inputHandlerThread);
@@ -401,16 +399,16 @@ int main(int argc, char **argv)
     threadCreate(&decoderThread, decLoop, NULL, 0x1000000, 0x2b, 2);
     threadStart(&decoderThread);
 
-
     while (appletMainLoop())
     {
         mutexLock(&buf_mut);
-        while(!frame_done) {
+        while (!frame_done)
+        {
             mutexUnlock(&frame_done);
             mutexLock(&frame_done);
         }
-        u8* fbuf = gfxGetFramebuffer(NULL, NULL);
-        memcpy(fbuf, tmp_buf, 1280*720*4);
+        u8 *fbuf = gfxGetFramebuffer(NULL, NULL);
+        memcpy(fbuf, tmp_buf, 1280 * 720 * 4);
         frame_done = 0;
         mutexUnlock(&buf_mut);
         gfxFlushBuffers();
