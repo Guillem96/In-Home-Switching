@@ -38,6 +38,7 @@
 #include <libavutil/timestamp.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
+#include <malloc.h>
 
 #include <switch.h>
 #include "input.h"
@@ -60,6 +61,11 @@ static int video_frame_count = 0;
 
 #define URL "tcp://0.0.0.0:2222"
 //#define TCP_RECV_BUFFER "500000"
+
+
+char* tmp_buf;//[1280*720*4]; // __attribute__((aligned(0x1000)));
+int frame_done = 1;
+static Mutex buf_mut;
 
 
 static const SocketInitConfig socketInitConf = {
@@ -121,16 +127,23 @@ static int decode_packet(int *got_frame, int cached)
             if (ctx_sws == NULL)
                 ctx_sws = sws_getContext(frame->width, frame->height, pix_fmt, frame->width, frame->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, 0, 0, 0);
 
-            u8 *fbuf = gfxGetFramebuffer(NULL, NULL);
+            //u8 *fbuf = gfxGetFramebuffer(NULL, NULL);
 
             
-            // We're scaling "into" the framebuffer for performance reasons.
-            sws_scale(ctx_sws, (const uint8_t *)frame->data, frame->linesize, 0, frame->height, &fbuf, rgbframe->linesize);
+            mutexLock(&buf_mut);
+            while(frame_done)
+            {
+                mutexUnlock(&buf_mut);
+                mutexLock(&buf_mut);
+            }
 
+            sws_scale(ctx_sws, (const uint8_t *)frame->data, frame->linesize, 0, frame->height, &tmp_buf, rgbframe->linesize);
+            frame_done = 1;
+            mutexUnlock(&buf_mut);
             //memcpy(fbuf, rgbframe->data[0], 1280 * 720 * 4);
 
-            gfxFlushBuffers();
-            gfxSwapBuffers();
+            //gfxFlushBuffers();
+            //gfxSwapBuffers();
         }
     }
     return ret;
@@ -207,7 +220,7 @@ int handleVid()
     //av_dict_set(&opts, "recv_buffer_size", TCP_RECV_BUFFER, 0);       // set option for size of receive buffer
 
     //open input file, and allocate format context
-
+    printf("Hey!!!\n");
     ret = avformat_open_input(&fmt_ctx, URL, 0, &opts);
     if (ret < 0)
     {
@@ -259,11 +272,6 @@ int handleVid()
         goto end;
     }
 
-    rgbframe = av_frame_alloc();
-    rgbframe->width = 1280;
-    rgbframe->height = 720;
-    rgbframe->format = AV_PIX_FMT_RGBA;
-    av_image_alloc(rgbframe->data, rgbframe->linesize, rgbframe->width, rgbframe->height, rgbframe->format, 32);
 
     frame = av_frame_alloc();
 
@@ -330,33 +338,83 @@ void inputHandlerLoop(void* dummy)
 void drawSplash()
 {
     FILE* img = fopen("romfs:/splash.rgba", "rb");
-    u8 *fbuf = gfxGetFramebuffer(NULL, NULL);
-    fread(fbuf, 1280*720*4, 1, img);
+
+    mutexLock(&buf_mut);
+    fread(tmp_buf, 1280*720*4, 1, img);
+    frame_done = 1;
+    mutexUnlock(&buf_mut);
+
     fclose(img);
-    gfxFlushBuffers();
-    gfxSwapBuffers();
 }
+
+
+void decLoop(void* dummy)
+{
+    socketInitialize(&socketInitConf);
+
+    while(appletMainLoop()) {
+        drawSplash();
+        handleVid();
+    }
+}
+
 
 int main(int argc, char **argv)
 {
-    pcvInitialize();
-    pcvSetClockRate(PcvModule_Cpu, 1785000000);
+    Handle mainThreadHandle = threadGetCurHandle();
+    svcSetThreadPriority(mainThreadHandle, 0x3b);
+    // Makes the main-thread preemptive
+
+    tmp_buf = memalign(0x1000, 1280*720*4);
+    memset(tmp_buf, 0xFF, 1280*720*4);
+    //pcvInitialize();
+    //pcvSetClockRate(PcvModule_Cpu, 1785000000);
     socketInitialize(&socketInitConf);
     romfsInit();
+
+    /*
+        Warning:
+        Nxlink likes to break things if you're dealing with multiple threads doing network stuff!
+        If you're doing printing in two threads at the same time it for some reason sometimes causes the thread to completely lock up
+    */
     nxlinkStdio();
+
     gfxInitDefault();
 
-    static Thread inputHandlerThread;
-    threadCreate(&inputHandlerThread, inputHandlerLoop, NULL, 0x1000, 0x2b, 0);
-    threadStart(&inputHandlerThread);
-
+    mutexInit(&buf_mut);
 
     avformat_network_init();
 
+    rgbframe = av_frame_alloc();
+    rgbframe->width = 1280;
+    rgbframe->height = 720;
+    rgbframe->format = AV_PIX_FMT_RGBA;
+    av_image_alloc(rgbframe->data, rgbframe->linesize, rgbframe->width, rgbframe->height, rgbframe->format, 32);
+
+
+
+    static Thread inputHandlerThread;
+    threadCreate(&inputHandlerThread, inputHandlerLoop, NULL, 0x100000, 0x2b, 1);
+    threadStart(&inputHandlerThread);
+
+    static Thread decoderThread;
+    threadCreate(&decoderThread, decLoop, NULL, 0x1000000, 0x2b, 2);
+    threadStart(&decoderThread);
+
+
     while (appletMainLoop())
     {
-        drawSplash();
-        handleVid();
+        mutexLock(&buf_mut);
+        while(!frame_done) {
+            mutexUnlock(&frame_done);
+            mutexLock(&frame_done);
+        }
+        u8* fbuf = gfxGetFramebuffer(NULL, NULL);
+        memcpy(fbuf, tmp_buf, 1280*720*4);
+        frame_done = 0;
+        mutexUnlock(&buf_mut);
+        gfxFlushBuffers();
+        gfxSwapBuffers();
     }
 
     avformat_network_deinit();

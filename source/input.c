@@ -80,7 +80,6 @@ void handleInput()
             lissock = -1;
             return;
         }
-        printf("Got gamepad-connection\n");
     }
 
     if (sock > 0)
